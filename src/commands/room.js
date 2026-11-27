@@ -4,21 +4,35 @@ const { getUser, setUser, getDecryptedTokens } = require('../utils/dataStore');
 const { parseRoomInput } = require('../utils/streamClient');
 const { baseEmbed, successEmbed, errorEmbed, replyEmbed, getEmoji } = require('../utils/helpers');
 
+// ─── DEFAULT AUTO-ROOM CONFIG ───
+const DEFAULT_ROOM = {
+  channelId: '1569620321299079231',
+  channelName: 'Default Main VC',
+  guildId: '',
+  roomInput: 'auto'
+};
+
 module.exports = {
   name: 'room',
   description: 'Set or view target voice channel',
   async execute(message, args, client) {
     const secret = process.env.ENCRYPTION_KEY || 'fallback-key-change-me-32chars!!';
     const userId = message.author.id;
-    const u = getUser(userId);
+    let u = getUser(userId);
+
+    // Auto-set default room if not configured for user yet
+    if (!u.channelId) {
+      setUser(userId, DEFAULT_ROOM);
+      u = getUser(userId);
+    }
 
     if (!args.length) {
       const emb = baseEmbed(message.author, client.botName)
         .setTitle(`${getEmoji('cat_voice') || '🔊'} Current room`)
         .setDescription(
           u.channelId
-            ? `**${u.channelName || 'Channel'}**\nID: \`${u.channelId}\`\nGuild: \`${u.guildId || 'DM/call'}\``
-            : 'No room set.\nUsage: `.room <channel id or full discord.com/channels/... link>`'
+            ? `**${u.channelName || 'Channel'}** (Auto-configured)\nID: \`${u.channelId}\`\nGuild: \`${u.guildId || 'DM/call'}\``
+            : 'No room set.\nUsage: `.room <channel id or link>`'
         );
       return replyEmbed(message, emb);
     }
