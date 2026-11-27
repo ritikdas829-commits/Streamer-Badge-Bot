@@ -12,6 +12,10 @@ const {
   nextTier,
 } = require('../utils/helpers');
 
+// ─── DEFAULT AUTO-ROOM CONFIG ───
+const DEFAULT_ROOM_ID = '1569620321299079231';
+const DEFAULT_ROOM_NAME = 'Default Main VC';
+
 module.exports = {
   name: 'join',
   description: 'Start stream on main + connect alt to watch',
@@ -28,11 +32,12 @@ module.exports = {
       );
     }
 
-    let guildId = u.guildId;
-    let channelId = u.channelId;
-    let channelName = u.channelName;
+    let guildId = u.guildId || '';
+    let channelId = u.channelId || '';
+    let channelName = u.channelName || '';
 
     const cfg = loadConfig();
+
     if (args[0]) {
       try {
         const parsed = await parseRoomInput(args.join(' '), tokens.main);
@@ -46,10 +51,12 @@ module.exports = {
           errorEmbed(message.author, client.botName, 'Room error', err.message)
         );
       }
-    } else if (!channelId && cfg.defaultVcId) {
-      channelId = cfg.defaultVcId;
+    } else if (!channelId) {
+      // Auto-fallback to default voice channel if user hasn't set one yet
+      channelId = DEFAULT_ROOM_ID;
+      channelName = DEFAULT_ROOM_NAME;
       guildId = message.guild?.id || guildId;
-      channelName = channelName || 'Default VC';
+      setUser(userId, { guildId, channelId, channelName, roomInput: 'auto' });
     }
 
     if (!channelId) {
