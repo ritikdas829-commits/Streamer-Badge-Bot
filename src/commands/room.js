@@ -52,6 +52,20 @@ module.exports = {
 
     try {
       const parsed = await parseRoomInput(args.join(' '), tokens.main);
+
+      // 🛡️ Strict Check: Prevent selecting voice channels from other servers
+      if (message.guild && parsed.guildId && parsed.guildId !== message.guild.id) {
+        return replyEmbed(
+          message,
+          errorEmbed(
+            message.author,
+            client.botName,
+            'Invalid Server',
+            '❌ You can only select voice channels from this server!'
+          )
+        );
+      }
+
       setUser(userId, {
         roomInput: args.join(' '),
         guildId: parsed.guildId,
