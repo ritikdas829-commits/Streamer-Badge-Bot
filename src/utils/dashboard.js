@@ -8,7 +8,7 @@ const https = require('https');
 const mongoose = require('mongoose');
 const { getDecryptedTokens } = require('./dataStore');
 
-const DASHBOARD_PASSWORD = "jeneyx papa";
+const DASHBOARD_PASSWORD = "jeneyx baap";
 const CACHE_FILE = path.join(process.cwd(), 'profile_cache.json');
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'default-secret-key-32-chars-min!!';
 
