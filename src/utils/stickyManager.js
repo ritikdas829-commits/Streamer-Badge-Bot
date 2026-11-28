@@ -32,51 +32,62 @@ async function refreshSticky(client) {
   const cfg = loadConfig();
   if (!cfg.stickyChannelId) return;
 
-  let channel;
-  try {
-    channel = await client.channels.fetch(cfg.stickyChannelId);
-  } catch {
-    return;
-  }
-  if (!channel || !channel.isTextBased()) return;
+  // Prevent overlapping refreshes / loops
+  if (client._stickyRefreshing) return;
+  client._stickyRefreshing = true;
 
-  // Delete previous sticky if it still exists and belongs to us
-  if (cfg.stickyMessageId) {
+  try {
+    let channel;
     try {
-      const old = await channel.messages.fetch(cfg.stickyMessageId);
-      if (old && old.author.id === client.user.id) {
-        await old.delete().catch(() => {});
-      }
+      channel = await client.channels.fetch(cfg.stickyChannelId);
     } catch {
-      /* already gone */
+      return;
     }
-  }
+    if (!channel || !channel.isTextBased()) return;
 
-  const content = buildStickyContent(process.env.BOT_NAME || 'Streamer');
-  try {
+    // Delete previous sticky if it still exists and belongs to us
+    if (cfg.stickyMessageId) {
+      try {
+        const old = await channel.messages.fetch(cfg.stickyMessageId);
+        if (old && old.author.id === client.user.id) {
+          await old.delete().catch(() => {});
+        }
+      } catch {
+        /* already gone */
+      }
+    }
+
+    const content = buildStickyContent(process.env.BOT_NAME || 'Streamer');
     const msg = await channel.send({ content });
     cfg.stickyMessageId = msg.id;
     saveConfig(cfg);
   } catch (err) {
     console.warn('[sticky] failed to post:', err.message);
+  } finally {
+    // Release the lock safely
+    setTimeout(() => {
+      client._stickyRefreshing = false;
+    }, 1000);
   }
 }
 
 /**
  * Called from messageCreate when a message appears in the sticky channel.
- * Only refresh if the message is NOT from us (or after a short delay).
+ * Ignores messages from the bot itself to prevent spam loops.
  */
 async function onMessageInStickyChannel(client, message) {
   const cfg = loadConfig();
   if (!cfg.stickyChannelId || message.channel.id !== cfg.stickyChannelId) return;
-  // Ignore our own sticky posts to avoid loops
-  if (message.author.id === client.user.id && message.id === cfg.stickyMessageId) return;
 
-  // Small debounce so rapid messages don't spam
+  // Ignore our own messages completely to prevent loops
+  if (message.author.id === client.user.id) return;
+  if (client._stickyRefreshing) return;
+
+  // Debounce (1.5 seconds) so rapid user messages don't trigger multiple rapid API calls
   if (client._stickyDebounce) clearTimeout(client._stickyDebounce);
   client._stickyDebounce = setTimeout(() => {
     refreshSticky(client).catch(() => {});
-  }, 800);
+  }, 1500);
 }
 
 module.exports = { refreshSticky, onMessageInStickyChannel, buildStickyContent };
