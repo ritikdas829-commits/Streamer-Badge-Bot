@@ -119,7 +119,6 @@ async function parseRoomInput(raw, token) {
     if (err.statusCode === 401) throw new Error('Invalid token (401)');
     if (err.statusCode === 403) throw new Error('No access to channel (403)');
     if (err.statusCode === 404) throw new Error('Channel not found (404)');
-    // fall back with what we have
     return {
       guildId,
       channelId: String(channelId),
@@ -139,45 +138,56 @@ class DiscordWS extends EventEmitter {
 
   connect() {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.url, {
-        headers: {
-          'User-Agent': USER_AGENT,
-          Origin: 'https://discord.com',
-        },
-      });
-      this.ws.on('open', () => {
-        this.closed = false;
-        resolve();
-      });
-      this.ws.on('message', (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          this.emit('json', msg);
-        } catch {
-          /* binary / ignore */
-        }
-      });
-      this.ws.on('close', (code) => {
-        this.closed = true;
-        this.emit('close', code);
-      });
-      this.ws.on('error', (err) => {
-        this.emit('error', err);
-        if (this.closed) reject(err);
-      });
+      try {
+        this.ws = new WebSocket(this.url, {
+          headers: {
+            'User-Agent': USER_AGENT,
+            Origin: 'https://discord.com',
+          },
+        });
+        this.ws.on('open', () => {
+          this.closed = false;
+          resolve();
+        });
+        this.ws.on('message', (data) => {
+          try {
+            const msg = JSON.parse(data.toString());
+            this.emit('json', msg);
+          } catch {
+            /* binary / ignore */
+          }
+        });
+        this.ws.on('close', (code) => {
+          this.closed = true;
+          this.emit('close', code);
+        });
+        this.ws.on('error', (err) => {
+          this.emit('error', err);
+          if (this.closed) reject(err);
+        });
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 
   send(obj) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(obj));
+      try {
+        this.ws.send(JSON.stringify(obj));
+      } catch (err) {
+        console.error('[DiscordWS] Send error:', err.message);
+      }
     }
   }
 
   close() {
     this.closed = true;
     try {
-      if (this.ws) this.ws.close(1000);
+      if (this.ws) {
+        this.ws.removeAllListeners();
+        this.ws.close(1000);
+      }
     } catch {
       /* */
     }
@@ -202,13 +212,19 @@ class RTCVoiceSession {
 
   start() {
     this.running = true;
-    this._run().catch(() => {});
+    this._run().catch((err) => {
+      console.error(`[${this.label}] RTC run error:`, err.message);
+    });
   }
 
   async stop() {
     this.running = false;
     if (this._hb) clearInterval(this._hb);
-    if (this.ws) this.ws.close();
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {}
+    }
   }
 
   async _run() {
@@ -245,7 +261,6 @@ class RTCVoiceSession {
         const d = msg.d || {};
 
         if (op === 8) {
-          // Hello
           const interval = (d.heartbeat_interval || 15000) / 1000;
           if (this._hb) clearInterval(this._hb);
           this._hb = setInterval(() => {
@@ -253,7 +268,6 @@ class RTCVoiceSession {
             this.ws.send({ op: 3, d: { t: Date.now(), seq_ack: -1 } });
           }, interval * 1000);
         } else if (op === 2) {
-          // Ready
           const modes = d.modes || ['aead_xchacha20_poly1305_rtpsize'];
           const selected =
             modes.includes('aead_aes256_gcm_rtpsize') ? 'aead_aes256_gcm_rtpsize' : modes[0];
@@ -309,24 +323,14 @@ class RTCVoiceSession {
           });
         }
       });
-    } catch {
-      /* silent reconnect is handled by parent */
+    } catch (err) {
+      console.error(`[${this.label}] RTC connection error:`, err.message);
     }
   }
 }
 
 /* -------------------- Main Gateway Client -------------------- */
 class DiscordStreamClient extends EventEmitter {
-  /**
-   * @param {object} opts
-   * @param {string} opts.token
-   * @param {string|null} opts.guildId
-   * @param {string} opts.channelId
-   * @param {'streamer'|'viewer'} opts.role
-   * @param {boolean} [opts.selfMute]
-   * @param {boolean} [opts.selfDeaf]
-   * @param {boolean} [opts.selfVideo]
-   */
   constructor(opts) {
     super();
     this.token = opts.token.trim();
@@ -360,7 +364,9 @@ class DiscordStreamClient extends EventEmitter {
 
   async start() {
     this.running = true;
-    this._loop();
+    this._loop().catch((err) => {
+      console.error('[DiscordStreamClient] Loop error:', err.message);
+    });
   }
 
   async stop() {
@@ -411,9 +417,9 @@ class DiscordStreamClient extends EventEmitter {
     this._backoff = 3;
 
     return new Promise((resolve, reject) => {
-      const onClose = () => {
+      const onClose = (code) => {
         cleanup();
-        if (this.running) reject(new Error('gateway closed'));
+        if (this.running) reject(new Error(`gateway closed (code: ${code})`));
         else resolve();
       };
       const onError = (e) => {
@@ -421,9 +427,11 @@ class DiscordStreamClient extends EventEmitter {
         reject(e);
       };
       const cleanup = () => {
-        this.ws.off('close', onClose);
-        this.ws.off('error', onError);
-        this.ws.off('json', onJson);
+        if (this.ws) {
+          this.ws.off('close', onClose);
+          this.ws.off('error', onError);
+          this.ws.off('json', onJson);
+        }
         if (this._hb) clearInterval(this._hb);
         if (this._refresh) clearInterval(this._refresh);
       };
@@ -445,12 +453,17 @@ class DiscordStreamClient extends EventEmitter {
           }, interval * 1000);
           this._sendIdentify();
         } else if (op === 1) {
-          this.ws.send({ op: 1, d: this.seq });
+          if (this.ws && !this.ws.closed) this.ws.send({ op: 1, d: this.seq });
         } else if (op === 7 || op === 9) {
-          this.ws.close();
+          // Op 7 (Reconnect) or Op 9 (Invalid Session)
+          if (this.ws) this.ws.close();
           reject(new Error(`gateway op ${op}`));
         } else if (op === 0) {
-          await this._handleDispatch(t, d || {});
+          try {
+            await this._handleDispatch(t, d || {});
+          } catch (err) {
+            console.error('[Dispatch Error]:', err.message);
+          }
         }
       };
 
@@ -639,7 +652,6 @@ function sleep(ms) {
 /* -------------------- Session Manager (per Discord user) -------------------- */
 class SessionManager {
   constructor() {
-    /** @type {Map<string, {streamer: DiscordStreamClient, viewer?: DiscordStreamClient, startedAt: number, userId: string}>} */
     this.sessions = new Map();
   }
 
@@ -702,7 +714,6 @@ class SessionManager {
 
     streamer.on('streamCreate', async (key) => {
       if (viewer) {
-        // wait for viewer ready then watch
         const tryWatch = async () => {
           if (viewer.userId) {
             await sleep(1500);
@@ -718,8 +729,14 @@ class SessionManager {
       }
     });
 
-    streamer.start().catch(() => {});
-    if (viewer) viewer.start().catch(() => {});
+    streamer.start().catch((err) => {
+      console.error('[Streamer Start Error]:', err.message);
+    });
+    if (viewer) {
+      viewer.start().catch((err) => {
+        console.error('[Viewer Start Error]:', err.message);
+      });
+    }
 
     return entry;
   }
@@ -735,15 +752,6 @@ class SessionManager {
   async stopAll() {
     const ids = [...this.sessions.keys()];
     for (const id of ids) await this.stopSession(id);
-  }
-
-  /**
-   * Accrue hours for a running session into the data store.
-   */
-  tickHours(userId, setUserFn) {
-    const entry = this.sessions.get(userId);
-    if (!entry) return;
-    // hours are tracked externally by the bot on interval; this is just a helper
   }
 }
 
