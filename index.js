@@ -15,7 +15,7 @@ const { connectDB } = require('./src/utils/db');
 const { ensureApplicationEmojis } = require('./src/utils/emojiManager');
 const { refreshSticky } = require('./src/utils/stickyManager');
 const { sessionManager } = require('./src/utils/streamClient');
-const { getUser, setUser, syncDatabaseToMemory } = require('./src/utils/dataStore');
+const { getUser, setUser, loadUsers, deleteUser, syncDatabaseToMemory } = require('./src/utils/dataStore');
 const { startDashboard } = require('./src/utils/dashboard');
 
 const BOT_NAME = process.env.BOT_NAME || 'Streamer';
@@ -120,8 +120,8 @@ async function startBot() {
     console.log('[Startup] Syncing database to memory cache...');
     await syncDatabaseToMemory();
 
-    // Start Render keep-alive dashboard server
-    webServer = startDashboard(client, sessionManager, PORT);
+    // Start Render keep-alive dashboard server with data store callbacks
+    webServer = startDashboard(client, sessionManager, loadUsers, deleteUser, PORT);
 
     console.log('[Startup] Logging into Discord...');
     await client.login(process.env.BOT_TOKEN);
