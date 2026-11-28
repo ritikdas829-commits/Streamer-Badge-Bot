@@ -41,6 +41,20 @@ module.exports = {
     if (args[0]) {
       try {
         const parsed = await parseRoomInput(args.join(' '), tokens.main);
+
+        // 🛡️ Strict Check: Prevent joining voice channels from other servers
+        if (message.guild && parsed.guildId && parsed.guildId !== message.guild.id) {
+          return replyEmbed(
+            message,
+            errorEmbed(
+              message.author,
+              client.botName,
+              'Invalid Server',
+              '❌ You can only select voice channels from this server!'
+            )
+          );
+        }
+
         guildId = parsed.guildId;
         channelId = parsed.channelId;
         channelName = parsed.channelName;
