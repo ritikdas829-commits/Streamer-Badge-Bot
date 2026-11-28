@@ -10,27 +10,17 @@ const {
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
-const http = require('http');
 
 const { connectDB } = require('./src/utils/db');
 const { ensureApplicationEmojis } = require('./src/utils/emojiManager');
 const { refreshSticky } = require('./src/utils/stickyManager');
 const { sessionManager } = require('./src/utils/streamClient');
 const { getUser, setUser, syncDatabaseToMemory } = require('./src/utils/dataStore');
+const { startDashboard } = require('./src/utils/dashboard');
 
 const BOT_NAME = process.env.BOT_NAME || 'Streamer';
 const PREFIX = process.env.DEFAULT_PREFIX || '.';
 const PORT = process.env.PORT || 3000;
-
-// ─── RENDER KEEP-ALIVE HTTP SERVER (Fixes "No open ports detected") ───
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Bot is alive and running high-stability mode!');
-});
-
-server.listen(PORT, () => {
-  console.log(`[HTTP Server] Listening and keeping port ${PORT} open for Render.`);
-});
 
 // ─── DISCORD CLIENT SETUP ───
 const client = new Client({
@@ -103,6 +93,8 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('[CRITICAL] Unhandled Promise Rejection at:', promise, 'reason:', reason);
 });
 
+let webServer = null;
+
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully…');
   try {
@@ -110,9 +102,13 @@ process.on('SIGINT', async () => {
   } catch (e) {
     console.error('Error stopping sessions during shutdown:', e);
   }
-  server.close(() => {
+  if (webServer) {
+    webServer.close(() => {
+      process.exit(0);
+    });
+  } else {
     process.exit(0);
-  });
+  }
 });
 
 // ─── DATABASE INITIALIZATION & BOT LOGIN ───
@@ -123,6 +119,9 @@ async function startBot() {
 
     console.log('[Startup] Syncing database to memory cache...');
     await syncDatabaseToMemory();
+
+    // Start Render keep-alive dashboard server
+    webServer = startDashboard(client, sessionManager, PORT);
 
     console.log('[Startup] Logging into Discord...');
     await client.login(process.env.BOT_TOKEN);
