@@ -12,10 +12,11 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
+const { connectDB } = require('./src/utils/db');
 const { ensureApplicationEmojis } = require('./src/utils/emojiManager');
 const { refreshSticky } = require('./src/utils/stickyManager');
 const { sessionManager } = require('./src/utils/streamClient');
-const { getUser, setUser } = require('./src/utils/dataStore');
+const { getUser, setUser, syncDatabaseToMemory } = require('./src/utils/dataStore');
 
 const BOT_NAME = process.env.BOT_NAME || 'Streamer';
 const PREFIX = process.env.DEFAULT_PREFIX || '.';
@@ -96,7 +97,6 @@ setInterval(() => {
 // ─── CRASH-PROOF GLOBAL ERROR HANDLERS ───
 process.on('uncaughtException', (err) => {
   console.error('[CRITICAL] Uncaught Exception:', err);
-  // Prevent immediate hard crash if non-fatal, or log properly
 });
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -115,8 +115,21 @@ process.on('SIGINT', async () => {
   });
 });
 
-// ─── BOT LOGIN ───
-client.login(process.env.BOT_TOKEN).catch((err) => {
-  console.error('Login failed:', err.message);
-  process.exit(1);
-});
+// ─── DATABASE INITIALIZATION & BOT LOGIN ───
+async function startBot() {
+  try {
+    console.log('[Startup] Connecting to MongoDB...');
+    await connectDB();
+
+    console.log('[Startup] Syncing database to memory cache...');
+    await syncDatabaseToMemory();
+
+    console.log('[Startup] Logging into Discord...');
+    await client.login(process.env.BOT_TOKEN);
+  } catch (err) {
+    console.error('[CRITICAL] Startup failed:', err.message);
+    process.exit(1);
+  }
+}
+
+startBot();
