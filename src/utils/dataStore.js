@@ -2,10 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const mongoose = require('mongoose');
 const { encrypt, decrypt } = require('./encryption');
 
 const DATA_DIR = path.join(__dirname, '..', '..', 'data');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const EMOJI_CACHE = path.join(DATA_DIR, 'emojis.json');
 
@@ -30,6 +30,49 @@ function writeJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
 }
 
+// ─── MONGODB USER SCHEMA & MODEL (Inside Storage) ───
+const userSchema = new mongoose.Schema({
+  userId: { type: String, required: true, unique: true },
+  mainTokenEnc: { type: String, default: '' },
+  altTokenEnc: { type: String, default: '' },
+  roomInput: { type: String, default: '' },
+  guildId: { type: String, default: null },
+  channelId: { type: String, default: null },
+  channelName: { type: String, default: '' },
+  totalSeconds: { type: Number, default: 0 },
+  linkedAt: { type: Number, default: null },
+  updatedAt: { type: Date, default: Date.now },
+});
+
+const StreamUser = mongoose.models.StreamUser || mongoose.model('StreamUser', userSchema);
+
+// In-memory cache to keep synchronous command calls working instantly
+const userCache = new Map();
+
+/**
+ * Sync all users from MongoDB into memory cache on startup.
+ */
+async function syncDatabaseToMemory() {
+  try {
+    const docs = await StreamUser.find({});
+    for (const doc of docs) {
+      userCache.set(doc.userId, {
+        mainTokenEnc: doc.mainTokenEnc || '',
+        altTokenEnc: doc.altTokenEnc || '',
+        roomInput: doc.roomInput || '',
+        guildId: doc.guildId || null,
+        channelId: doc.channelId || null,
+        channelName: doc.channelName || '',
+        totalSeconds: doc.totalSeconds || 0,
+        linkedAt: doc.linkedAt || null,
+      });
+    }
+    console.log(`[DataStore] Synced ${docs.length} users from MongoDB into memory.`);
+  } catch (err) {
+    console.error('[DataStore] MongoDB sync error:', err.message);
+  }
+}
+
 /* -------------------- Config -------------------- */
 function loadConfig() {
   return readJson(CONFIG_FILE, {
@@ -46,44 +89,63 @@ function saveConfig(cfg) {
   writeJson(CONFIG_FILE, cfg);
 }
 
-/* -------------------- Users -------------------- */
+/* -------------------- Users (MongoDB + Cache) -------------------- */
 function loadUsers() {
-  return readJson(USERS_FILE, {});
+  const obj = {};
+  for (const [userId, data] of userCache.entries()) {
+    obj[userId] = data;
+  }
+  return obj;
 }
 
 function saveUsers(users) {
-  writeJson(USERS_FILE, users);
+  for (const [userId, data] of Object.entries(users)) {
+    userCache.set(userId, data);
+    StreamUser.findOneAndUpdate(
+      { userId },
+      { $set: { ...data, updatedAt: new Date() } },
+      { upsert: true, new: true }
+    ).catch(err => console.error(`[DataStore] Failed to save user ${userId}:`, err.message));
+  }
 }
 
 /**
  * Get user record. Tokens are stored encrypted.
  */
 function getUser(userId) {
-  const users = loadUsers();
-  const u = users[userId] || {
-    mainTokenEnc: '',
-    altTokenEnc: '',
-    roomInput: '',
-    guildId: null,
-    channelId: null,
-    channelName: '',
-    totalSeconds: 0,
-    linkedAt: null,
-  };
-  return u;
+  if (!userCache.has(userId)) {
+    userCache.set(userId, {
+      mainTokenEnc: '',
+      altTokenEnc: '',
+      roomInput: '',
+      guildId: null,
+      channelId: null,
+      channelName: '',
+      totalSeconds: 0,
+      linkedAt: null,
+    });
+  }
+  return userCache.get(userId);
 }
 
 function setUser(userId, partial) {
-  const users = loadUsers();
-  users[userId] = { ...getUser(userId), ...partial };
-  saveUsers(users);
-  return users[userId];
+  const current = getUser(userId);
+  const updated = { ...current, ...partial };
+  userCache.set(userId, updated);
+
+  // Push updates to MongoDB asynchronously
+  StreamUser.findOneAndUpdate(
+    { userId },
+    { $set: { ...updated, updatedAt: new Date() } },
+    { upsert: true, new: true }
+  ).catch(err => console.error(`[DataStore] Failed to update user ${userId}:`, err.message));
+
+  return updated;
 }
 
 function deleteUser(userId) {
-  const users = loadUsers();
-  delete users[userId];
-  saveUsers(users);
+  userCache.delete(userId);
+  StreamUser.deleteOne({ userId }).catch(err => console.error(`[DataStore] Failed to delete user ${userId}:`, err.message));
 }
 
 function getDecryptedTokens(userId, secret) {
@@ -117,6 +179,7 @@ function saveEmojiCache(map) {
 }
 
 module.exports = {
+  syncDatabaseToMemory,
   loadConfig,
   saveConfig,
   loadUsers,
