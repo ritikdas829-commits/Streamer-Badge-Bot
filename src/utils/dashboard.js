@@ -2,349 +2,650 @@
 
 const http = require('http');
 const url = require('url');
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+const crypto = require('crypto');
 
 const DASHBOARD_PASSWORD = "jeneyx papa";
 
-function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, port = 3000) {
-  const server = http.createServer(async (req, res) => {
-    const parsedUrl = url.parse(req.url, true);
-    const pathname = parsedUrl.pathname;
-    const cookies = req.headers.cookie || '';
-    const isAuthenticated = cookies.includes('authenticated=true');
+const TOKENS_FILE = path.join(process.cwd(), 'tokens.json');
+const CACHE_FILE = path.join(process.cwd(), 'profile_cache.json');
 
-    // ── LOGIN PAGE (GET) ──
-    if (pathname === '/login' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      return res.end(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>StreamBot | Login</title>
-            <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-            <style>
-                body { background-color: #000; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
-                .box { background: #0a0a0a; border: 1px solid #1a1a1a; padding: 35px; border-radius: 12px; width: 320px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; }
-                h2 { margin-bottom: 20px; font-weight: 800; font-size: 22px; }
-                h2 span { color: #00F5FF; }
-                input { width: 100%; padding: 12px; margin-bottom: 15px; background: #000; border: 1px solid #222; color: #fff; border-radius: 6px; box-sizing: border-box; font-size: 14px; }
-                input:focus { border-color: #00F5FF; outline: none; }
-                button { background: #00F5FF; color: #000; border: none; padding: 12px; width: 100%; border-radius: 6px; font-weight: 700; cursor: pointer; transition: 0.2s; }
-                button:hover { opacity: 0.9; }
-                .error { color: #ff4757; font-size: 13px; margin-top: 10px; font-weight: 600; }
-            </style>
-        </head>
-        <body>
-            <div class="box">
-                <h2>Stream <span>Admin</span></h2>
-                <form method="POST" action="/login">
-                    <input type="password" name="password" placeholder="Enter Dashboard Password" required>
-                    <button type="submit">Access Panel</button>
-                </form>
-            </div>
-        </body>
-        </html>
-      `);
-    }
-
-    // ── LOGIN POST ──
-    if (pathname === '/login' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        const password = new URLSearchParams(body).get('password');
-        if (password === DASHBOARD_PASSWORD) {
-          res.writeHead(302, {
-            'Location': '/dash',
-            'Set-Cookie': 'authenticated=true; Path=/'
-          });
-          res.end();
-        } else {
-          res.writeHead(302, { 'Location': '/login' });
-          res.end();
+function loadJson(file, fallback = {}) {
+    try {
+        if (fs.existsSync(file)) {
+            return JSON.parse(fs.readFileSync(file, 'utf8'));
         }
-      });
-      return;
-    }
+    } catch (e) {}
+    return fallback;
+}
 
-    // ── LOGOUT ──
-    if (pathname === '/logout') {
-      res.writeHead(302, {
-        'Location': '/login',
-        'Set-Cookie': 'authenticated=expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/'
-      });
-      return res.end();
-    }
+function saveJson(file, data) {
+    try {
+        fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+    } catch (e) {}
+}
 
-    // ── PING ROUTE FOR RENDER KEEP-ALIVE ──
-    if (pathname === '/ping') {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      return res.end('OK');
-    }
+// ── HTML TEMPLATE ──
+const HTML_TEMPLATE = (tokens, errorMsg = '') => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>jeneyx | Admin Panel</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-    // ── REDIRECT ROOT ──
-    if (pathname === '/' || pathname === '') {
-      res.writeHead(302, { 'Location': isAuthenticated ? '/dash' : '/login' });
-      return res.end();
-    }
+    <style>
+        :root {
+            --bg-color: #000000;
+            --sidebar-bg: #000000;
+            --surface-color: #0a0a0a;
+            --border-color: #1a1a1a;
+            --primary-color: #00F5FF;
+            --text-main: #ffffff;
+            --text-muted: #888888;
+            --danger: #ff4757;
+            --success: #2ed573;
+        }
 
-    // AUTH CHECK FOR DASHBOARD & APIS
-    if (!isAuthenticated) {
-      res.writeHead(302, { 'Location': '/login' });
-      return res.end();
-    }
-
-    // ── API: LIVE STATS FOR CHART ──
-    if (pathname === '/api/live_stats') {
-      const users = getUsersFunc();
-      const sortedUsers = Object.entries(users)
-        .sort((a, b) => (b[1].totalSeconds || 0) - (a[1].totalSeconds || 0))
-        .slice(0, 5);
-      
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({
-        labels: sortedUsers.map(([uid]) => uid.substring(0, 8)),
-        data: sortedUsers.map(([, info]) => Number(((info.totalSeconds || 0) / 3600).toFixed(1)))
-      }));
-    }
-
-    // ── API: DELETE USER ──
-    if (pathname.startsWith('/api/delete/') && req.method === 'POST') {
-      const userId = pathname.split('/')[3];
-      deleteUserFunc(userId);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: true }));
-    }
-
-    // ── MAIN ADMIN DASHBOARD PANEL (/dash) ──
-    if (pathname === '/dash') {
-      const users = getUsersFunc();
-      const totalUsers = Object.keys(users).length;
-      const activeStreams = sessionManager.sessions ? sessionManager.sessions.size : 0;
-      
-      let totalSecondsAll = 0;
-      for (const u of Object.values(users)) {
-        totalSecondsAll += (u.totalSeconds || 0);
-      }
-      const totalHours = (totalSecondsAll / 3600).toFixed(1);
-
-      let tableRows = '';
-      for (const [d_id, data] of Object.entries(users)) {
-        const roomInput = data.roomInput || 'N/A';
-        const channelName = data.channelName || 'N/A';
-        const hours = ((data.totalSeconds || 0) / 3600).toFixed(1);
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
         
-        tableRows += `
-          <tr id="row-${d_id}">
-              <td>
-                  <div class="user-profile-cell">
-                      <img src="https://cdn.discordapp.com/embed/avatars/0.png" class="user-avatar" id="avatar-${d_id}">
-                      <div class="user-details">
-                          <span class="user-name" id="username-${d_id}">Streamer</span>
-                          <span class="user-id">${d_id}</span>
-                      </div>
-                  </div>
-              </td>
-              <td><span class="token-box">${roomInput}</span></td>
-              <td>${channelName}</td>
-              <td><b>${hours} hrs</b></td>
-              <td>
-                  <button class="btn-action btn-delete" onclick="deleteUser('${d_id}')"><i class="fa-solid fa-trash"></i></button>
-              </td>
-          </tr>
-        `;
-      }
+        body { 
+            background-color: var(--bg-color); 
+            color: var(--text-main); 
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
 
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      return res.end(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Stream Bot | Admin Panel</title>
-            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-            <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-            <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
-            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-color); }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--primary-color); }
 
-            <style>
-                :root {
-                    --bg-color: #000000;
-                    --sidebar-bg: #000000;
-                    --surface-color: #0a0a0a;
-                    --border-color: #1a1a1a;
-                    --primary-color: #00F5FF;
-                    --text-main: #ffffff;
-                    --text-muted: #888888;
-                    --danger: #ff4757;
-                    --success: #2ed573;
+        .panel {
+            background: var(--surface-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+        }
+
+        /* ── SIDEBAR ── */
+        .sidebar {
+            width: 260px;
+            height: 100vh;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 30px 20px;
+            z-index: 10;
+        }
+        .brand { display: flex; align-items: center; gap: 15px; margin-bottom: 40px; padding: 0 10px; }
+        .brand img { height: 40px; border-radius: 50%; border: 2px solid var(--primary-color); box-shadow: 0 0 10px rgba(0,245,255,0.2); }
+        .brand h2 { font-size: 20px; font-weight: 800; letter-spacing: 0.5px; }
+        .brand h2 span { color: var(--primary-color); }
+        
+        .nav-menu { display: flex; flex-direction: column; gap: 8px; flex-grow: 1; }
+        .nav-link { 
+            display: flex; align-items: center; gap: 15px; 
+            padding: 12px 18px; 
+            color: var(--text-muted); 
+            text-decoration: none; 
+            border-radius: 8px; 
+            font-weight: 600; 
+            transition: 0.2s;
+            cursor: pointer;
+        }
+        .nav-link i { font-size: 18px; width: 24px; text-align: center; }
+        .nav-link:hover, .nav-link.active { background: rgba(0, 245, 255, 0.1); color: var(--primary-color); }
+        
+        .logout-btn { margin-top: auto; display: flex; align-items: center; gap: 15px; padding: 12px 18px; color: var(--danger); text-decoration: none; border-radius: 8px; font-weight: 700; transition: 0.2s; background: rgba(255, 71, 87, 0.1); border: 1px solid rgba(255, 71, 87, 0.2); }
+        .logout-btn:hover { background: var(--danger); color: white; }
+
+        /* ── MAIN CONTENT ── */
+        .main-content { flex-grow: 1; overflow-y: auto; padding: 30px 40px; height: 100vh; scroll-behavior: smooth; }
+        
+        .top-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+        .top-header h1 { font-size: 30px; font-weight: 800; }
+        .top-header p { color: var(--text-muted); font-size: 14px; margin-top: 5px; }
+        .admin-profile { display: flex; align-items: center; gap: 15px; padding: 10px 20px; }
+        .admin-profile i { color: var(--primary-color); font-size: 20px; }
+
+        /* Stats Grid */
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
+        .stat-card { padding: 25px; display: flex; align-items: center; gap: 20px; transition: 0.3s; }
+        .stat-card:hover { border-color: #333; }
+        .stat-icon { font-size: 24px; padding: 15px; border-radius: 12px; display: flex; align-items: center; justify-content: center; }
+        .stat-icon.cyan { color: var(--primary-color); background: rgba(0, 245, 255, 0.1); }
+        .stat-icon.purple { color: #b388ff; background: rgba(112, 0, 255, 0.1); }
+        .stat-icon.green { color: var(--success); background: rgba(46, 213, 115, 0.1); }
+        .stat-icon.red { color: var(--danger); background: rgba(255, 71, 87, 0.1); }
+        
+        .stat-info h3 { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; margin-bottom: 5px; }
+        .stat-info p { font-size: 26px; font-weight: 800; }
+
+        /* Chart Section */
+        .chart-container { padding: 25px; margin-bottom: 30px; height: 350px; display: flex; flex-direction: column; }
+        .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .chart-header h2 { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+        .chart-header h2 i { color: var(--primary-color); }
+        .chart-wrapper { flex-grow: 1; position: relative; width: 100%; }
+
+        /* Data Table */
+        .table-container { padding: 25px; margin-bottom: 30px; }
+        .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .table-header h2 { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+        
+        table.dataTable { width: 100% !important; border-collapse: collapse; }
+        table.dataTable thead th { background: transparent; border-bottom: 1px solid var(--border-color); color: var(--text-muted); font-size: 12px; text-transform: uppercase; padding: 15px 10px; }
+        table.dataTable tbody td { padding: 15px 10px; border-bottom: 1px solid var(--border-color); font-size: 14px; }
+        
+        .token-box { font-family: 'Courier New', monospace; color: #ccc; background: #000; padding: 6px 10px; border-radius: 4px; border: 1px solid #333; display: inline-block; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        
+        .btn-action { padding: 8px 12px; border-radius: 6px; cursor: pointer; border: none; font-weight: 600; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; transition: 0.2s; }
+        .btn-copy { background: rgba(0, 245, 255, 0.1); color: var(--primary-color); border: 1px solid rgba(0, 245, 255, 0.3); }
+        .btn-copy:hover { background: var(--primary-color); color: #000; }
+        .btn-delete { background: rgba(255, 71, 87, 0.1); color: var(--danger); border: 1px solid rgba(255, 71, 87, 0.3); margin-left: 5px; }
+        .btn-delete:hover { background: var(--danger); color: white; }
+
+        /* User Profile UI */
+        .user-profile-cell { display: flex; align-items: center; gap: 12px; }
+        .user-avatar { width: 36px; height: 36px; border-radius: 50%; background: #222; border: 1px solid #333; object-fit: cover; }
+        .user-details { display: flex; flex-direction: column; }
+        .user-name { font-weight: 700; font-size: 14px; }
+        .user-id { font-size: 11px; color: var(--text-muted); }
+
+        /* Datatables Black Theme */
+        .dataTables_filter input { background: #000 !important; border: 1px solid #333 !important; color: white !important; border-radius: 6px !important; padding: 8px 15px !important; outline: none !important; margin-left: 10px !important; }
+        .dataTables_wrapper .dataTables_paginate .paginate_button { background: #0a0a0a !important; border: 1px solid #1a1a1a !important; color: var(--text-muted) !important; border-radius: 6px !important; padding: 5px 12px !important; margin: 0 4px !important; }
+        .dataTables_wrapper .dataTables_paginate .paginate_button.current { background: rgba(0, 245, 255, 0.2) !important; border-color: var(--primary-color) !important; color: var(--primary-color) !important; font-weight: 800 !important; }
+        .dataTables_wrapper .dataTables_info { color: var(--text-muted) !important; font-size: 13px !important; }
+
+        /* Login */
+        .login-wrapper { display: flex; justify-content: center; align-items: center; height: 100vh; width: 100vw; }
+        .login-box { width: 100%; max-width: 400px; padding: 40px; text-align: center; }
+        .login-box i.main-icon { font-size: 50px; color: var(--primary-color); margin-bottom: 20px; }
+        .login-box h2 { font-size: 24px; font-weight: 800; margin-bottom: 10px; }
+        .login-box p { color: var(--text-muted); font-size: 14px; margin-bottom: 30px; }
+        
+        .input-group { position: relative; margin-bottom: 20px; }
+        .input-group i { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 16px; }
+        input[type="password"] { width: 100%; padding: 14px 14px 14px 45px; background: #000; border: 1px solid #333; color: white; border-radius: 8px; outline: none; transition: 0.2s; font-size: 15px; }
+        input[type="password"]:focus { border-color: var(--primary-color); }
+        
+        .btn-login { width: 100%; padding: 14px; background: var(--primary-color); color: #000; border: none; border-radius: 8px; font-weight: 800; font-size: 16px; cursor: pointer; transition: 0.2s; }
+        .btn-login:hover { background: #00d0d9; }
+        .error-msg { color: var(--danger); font-size: 14px; margin-top: 15px; background: rgba(255, 71, 87, 0.1); padding: 10px; border-radius: 8px; border: 1px solid rgba(255, 71, 87, 0.3); }
+
+        #toast { position: fixed; bottom: 30px; right: 30px; background: var(--success); color: white; padding: 15px 25px; border-radius: 8px; font-weight: 700; display: none; align-items: center; gap: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); z-index: 9999; border: 1px solid rgba(255,255,255,0.2); }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="brand">
+            <img src="https://cdn.discordapp.com/icons/1545837289912008766/8a755141787ac342c2d56b352f1260eb.webp?size=1024" alt="Logo">
+            <h2>jeneyx <span>Core</span></h2>
+        </div>
+        <div class="nav-menu">
+            <a href="#dashboard-section" class="nav-link active"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
+            <a href="#users-section" class="nav-link"><i class="fa-solid fa-users"></i> Users</a>
+            <a href="#" onclick="showToast('Nodes feature coming soon!', 'var(--primary-color)'); return false;" class="nav-link"><i class="fa-solid fa-server"></i> Nodes</a>
+            <a href="#" onclick="showToast('Settings feature coming soon!', 'var(--primary-color)'); return false;" class="nav-link"><i class="fa-solid fa-gear"></i> Settings</a>
+        </div>
+        <a href="/logout" class="logout-btn"><i class="fa-solid fa-power-off"></i> End Session</a>
+    </div>
+
+    <div class="main-content">
+        <div id="dashboard-section" class="top-header">
+            <div>
+                <h1>System Overview</h1>
+                <p>Live telemetry and database statistics.</p>
+            </div>
+            <div class="panel admin-profile">
+                <i class="fa-solid fa-user-shield"></i>
+                <span style="font-weight: 700;">Root Admin</span>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="panel stat-card">
+                <div class="stat-icon cyan"><i class="fa-solid fa-users-viewfinder"></i></div>
+                <div class="stat-info">
+                    <h3>Total Users</h3>
+                    <p>${Object.keys(tokens).length}</p>
+                </div>
+            </div>
+            <div class="panel stat-card">
+                <div class="stat-icon purple"><i class="fa-solid fa-gamepad"></i></div>
+                <div class="stat-info">
+                    <h3>Total Games</h3>
+                    <p>${Object.values(tokens).reduce((acc, v) => acc + (v.total_games_claimed || 0), 0)}</p>
+                </div>
+            </div>
+            <div class="panel stat-card">
+                <div class="stat-icon green"><i class="fa-solid fa-clock"></i></div>
+                <div class="stat-info">
+                    <h3>Total Hours</h3>
+                    <p>${Math.round(Object.values(tokens).reduce((acc, v) => acc + (v.total_hours_claimed || 0), 0))}</p>
+                </div>
+            </div>
+            <div class="panel stat-card">
+                <div class="stat-icon red"><i class="fa-solid fa-shield-halved"></i></div>
+                <div class="stat-info">
+                    <h3>Bot Status</h3>
+                    <p style="color: var(--success); font-size: 20px;">Online</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel chart-container">
+            <div class="chart-header">
+                <h2><i class="fa-solid fa-chart-simple"></i> Live Top Users Performance</h2>
+                <span style="font-size: 12px; color: var(--success);"><i class="fa-solid fa-circle" style="font-size: 8px;"></i> Live Updates</span>
+            </div>
+            <div class="chart-wrapper">
+                <canvas id="userChart"></canvas>
+            </div>
+        </div>
+
+        <div id="users-section" class="panel table-container">
+            <div class="table-header">
+                <h2><i class="fa-solid fa-database"></i> Connected Accounts</h2>
+            </div>
+            <table id="userTable" class="display" style="width:100%">
+                <thead>
+                    <tr>
+                        <th>User Profile</th>
+                        <th>Account UID</th>
+                        <th>Token</th>
+                        <th>Games</th>
+                        <th>Hours</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${Object.entries(tokens).map(([d_id, data]) => `
+                        <tr id="row-${d_id}">
+                            <td>
+                                <div class="user-profile-cell">
+                                    <img src="https://cdn.discordapp.com/embed/avatars/0.png" class="user-avatar" id="avatar-${d_id}">
+                                    <div class="user-details">
+                                        <span class="user-name" id="username-${d_id}">Loading...</span>
+                                        <span class="user-id">${d_id}</span>
+                                    </div>
+                                </div>
+                            </td>
+                            <td style="color: var(--primary-color); font-weight: 600;">${data.user_id_cache || 'N/A'}</td>
+                            <td><span class="token-box" id="token-${d_id}">${data.token || 'N/A'}</span></td>
+                            <td><b>${data.total_games_claimed || 0}</b></td>
+                            <td>${(data.total_hours_claimed || 0).toFixed(1)}</td>
+                            <td>
+                                <button class="btn-action btn-copy" onclick="copyToken('${d_id}')"><i class="fa-solid fa-copy"></i> Copy</button>
+                                <button class="btn-action btn-delete" onclick="deleteToken('${d_id}')"><i class="fa-solid fa-trash"></i></button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="toast"><i class="fa-solid fa-circle-check"></i> Action Successful!</div>
+
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+    <script>
+        let userTable;
+        $(document).ready(function() {
+            userTable = $('#userTable').DataTable({
+                "pageLength": 10,
+                "order": [[ 3, "desc" ]],
+                "language": { "search": "", "searchPlaceholder": "Search accounts..." }
+            });
+            
+            userTable.on('draw', function () {
+                var rows = userTable.rows({ page: 'current' }).nodes();
+                for (let i = 0; i < rows.length; i++) {
+                    let d_id = rows[i].id.replace('row-', '');
+                    fetchProfile(d_id);
                 }
-                * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
-                body { background-color: var(--bg-color); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }
-                .panel { background: var(--surface-color); border: 1px solid var(--border-color); border-radius: 12px; }
-                .sidebar { width: 260px; height: 100vh; background: var(--sidebar-bg); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 30px 20px; z-index: 10; }
-                .brand { display: flex; align-items: center; justify-content: space-between; margin-bottom: 40px; padding: 0 10px; }
-                .brand h2 { font-size: 20px; font-weight: 800; }
-                .brand h2 span { color: var(--primary-color); }
-                .logout-btn { color: var(--danger); text-decoration: none; font-size: 16px; }
-                .nav-menu { display: flex; flex-direction: column; gap: 8px; flex-grow: 1; }
-                .nav-link { display: flex; align-items: center; gap: 15px; padding: 12px 18px; color: var(--text-muted); text-decoration: none; border-radius: 8px; font-weight: 600; transition: 0.2s; background: rgba(0, 245, 255, 0.1); color: var(--primary-color); }
-                .main-content { flex-grow: 1; overflow-y: auto; padding: 30px 40px; height: 100vh; }
-                .top-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
-                .top-header h1 { font-size: 30px; font-weight: 800; }
-                .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
-                .stat-card { padding: 25px; display: flex; align-items: center; gap: 20px; }
-                .stat-icon { font-size: 24px; padding: 15px; border-radius: 12px; display: flex; align-items: center; justify-content: center; }
-                .stat-icon.cyan { color: var(--primary-color); background: rgba(0, 245, 255, 0.1); }
-                .stat-icon.purple { color: #b388ff; background: rgba(112, 0, 255, 0.1); }
-                .stat-icon.green { color: var(--success); background: rgba(46, 213, 115, 0.1); }
-                .stat-icon.red { color: var(--danger); background: rgba(255, 71, 87, 0.1); }
-                .stat-info h3 { color: var(--text-muted); font-size: 12px; text-transform: uppercase; margin-bottom: 5px; }
-                .stat-info p { font-size: 26px; font-weight: 800; }
-                .chart-container { padding: 25px; margin-bottom: 30px; height: 350px; display: flex; flex-direction: column; }
-                .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-                .chart-wrapper { flex-grow: 1; position: relative; width: 100%; }
-                .table-container { padding: 25px; margin-bottom: 30px; }
-                table.dataTable { width: 100% !important; border-collapse: collapse; }
-                table.dataTable thead th { color: var(--text-muted); font-size: 12px; text-transform: uppercase; padding: 15px 10px; border-bottom: 1px solid var(--border-color); }
-                table.dataTable tbody td { padding: 15px 10px; border-bottom: 1px solid var(--border-color); font-size: 14px; }
-                .token-box { font-family: 'Courier New', monospace; color: #ccc; background: #000; padding: 6px 10px; border-radius: 4px; border: 1px solid #333; display: inline-block; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-                .btn-action { padding: 8px 12px; border-radius: 6px; cursor: pointer; border: none; font-weight: 600; font-size: 12px; }
-                .btn-delete { background: rgba(255, 71, 87, 0.1); color: var(--danger); border: 1px solid rgba(255, 71, 87, 0.3); }
-                .user-profile-cell { display: flex; align-items: center; gap: 12px; }
-                .user-avatar { width: 36px; height: 36px; border-radius: 50%; background: #222; border: 1px solid #333; object-fit: cover; }
-                .user-details { display: flex; flex-direction: column; }
-                .user-name { font-weight: 700; font-size: 14px; }
-                .user-id { font-size: 11px; color: var(--text-muted); }
-                #toast { position: fixed; bottom: 30px; right: 30px; background: var(--success); color: white; padding: 15px 25px; border-radius: 8px; font-weight: 700; display: none; z-index: 9999; }
-            </style>
-        </head>
-        <body>
-            <div class="sidebar">
-                <div class="brand">
-                    <h2>Stream <span>Bot</span></h2>
-                    <a href="/logout" class="logout-btn" title="Logout"><i class="fa-solid fa-right-from-bracket"></i></a>
-                </div>
-                <div class="nav-menu">
-                    <a href="/dash" class="nav-link"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
-                </div>
+            });
+            userTable.draw();
+        });
+
+        async function fetchProfile(discordId) {
+            let nameEl = document.getElementById('username-' + discordId);
+            if (!nameEl || nameEl.innerText !== "Loading...") return;
+            try {
+                const res = await fetch('/api/user/' + discordId);
+                const data = await res.json();
+                if(data && data.avatar) document.getElementById('avatar-' + discordId).src = data.avatar;
+                if(data && data.username) document.getElementById('username-' + discordId).innerText = data.username;
+            } catch(e) { nameEl.innerText = "Unknown"; }
+        }
+
+        function copyToken(id) {
+            var text = document.getElementById('token-' + id).innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Token Copied!', 'var(--success)');
+            }).catch(() => {
+                showToast('Failed to copy', 'var(--danger)');
+            });
+        }
+
+        function deleteToken(id) {
+            if(!confirm("Are you sure you want to delete this user and their token?")) return;
+            fetch('/api/delete/' + id, { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if(data.success) {
+                    $('#row-' + id).fadeOut(500, function() { 
+                        userTable.row($(this)).remove().draw(false); 
+                    });
+                    showToast('User Deleted!', 'var(--danger)');
+                }
+            });
+        }
+
+        function showToast(msg, color) {
+            var toast = document.getElementById('toast');
+            toast.style.background = color;
+            toast.innerHTML = '<i class="fa-solid fa-circle-check"></i> ' + msg;
+            toast.style.display = 'flex';
+            setTimeout(() => { toast.style.display = 'none'; }, 3000);
+        }
+
+        const ctx = document.getElementById('userChart').getContext('2d');
+        const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+        gradient.addColorStop(0, 'rgba(0, 245, 255, 0.3)');
+        gradient.addColorStop(1, 'rgba(0, 245, 255, 0.0)');
+
+        let userChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Games Claimed',
+                    data: [],
+                    borderColor: '#00F5FF',
+                    backgroundColor: gradient,
+                    borderWidth: 2,
+                    pointBackgroundColor: '#000',
+                    pointBorderColor: '#00F5FF',
+                    pointBorderWidth: 2,
+                    pointRadius: 4,
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { grid: { color: '#1a1a1a' }, ticks: { color: '#888' } },
+                    x: { grid: { display: false }, ticks: { color: '#888' } }
+                }
+            }
+        });
+
+        async function updateChart() {
+            try {
+                const res = await fetch('/api/live_stats');
+                const data = await res.json();
+                userChart.data.labels = data.labels;
+                userChart.data.datasets[0].data = data.data;
+                userChart.update('none');
+            } catch(e) {}
+        }
+        updateChart();
+        setInterval(updateChart, 5000);
+    </script>
+</body>
+</html>
+`;
+
+const LOGIN_TEMPLATE = (errorMsg = '') => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>jeneyx | Login</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #000000;
+            --surface-color: #0a0a0a;
+            --border-color: #1a1a1a;
+            --primary-color: #00F5FF;
+            --text-main: #ffffff;
+            --text-muted: #888888;
+            --danger: #ff4757;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-main); display: flex; justify-content: center; align-items: center; height: 100vh; width: 100vw; }
+        .panel { background: var(--surface-color); border: 1px solid var(--border-color); border-radius: 12px; }
+        .login-box { width: 100%; max-width: 400px; padding: 40px; text-align: center; }
+        .login-box i.main-icon { font-size: 50px; color: var(--primary-color); margin-bottom: 20px; }
+        .login-box h2 { font-size: 24px; font-weight: 800; margin-bottom: 10px; }
+        .login-box p { color: var(--text-muted); font-size: 14px; margin-bottom: 30px; }
+        .input-group { position: relative; margin-bottom: 20px; }
+        .input-group i { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 16px; }
+        input[type="password"] { width: 100%; padding: 14px 14px 14px 45px; background: #000; border: 1px solid #333; color: white; border-radius: 8px; outline: none; font-size: 15px; }
+        input[type="password"]:focus { border-color: var(--primary-color); }
+        .btn-login { width: 100%; padding: 14px; background: var(--primary-color); color: #000; border: none; border-radius: 8px; font-weight: 800; font-size: 16px; cursor: pointer; }
+        .error-msg { color: var(--danger); font-size: 14px; margin-top: 15px; background: rgba(255, 71, 87, 0.1); padding: 10px; border-radius: 8px; border: 1px solid rgba(255, 71, 87, 0.3); }
+    </style>
+</head>
+<body>
+    <div class="panel login-box">
+        <i class="fa-solid fa-shield-halved main-icon"></i>
+        <h2>Root Authentication</h2>
+        <p>Secure access to jeneyx Dashboard</p>
+        <form method="POST" action="/login">
+            <div class="input-group">
+                <i class="fa-solid fa-lock"></i>
+                <input type="password" name="password" placeholder="Enter System Password" required>
             </div>
+            <button type="submit" class="btn-login">Authorize</button>
+        </form>
+        ${errorMsg ? `<div class="error-msg"><i class="fa-solid fa-triangle-exclamation"></i> ${errorMsg}</div>` : ''}
+    </div>
+</body>
+</html>
+`;
 
-            <div class="main-content">
-                <div class="top-header">
-                    <div>
-                        <h1>Stream Bot Overview</h1>
-                        <p>Live MongoDB telemetry and streaming statistics.</p>
-                    </div>
-                </div>
+function parseCookies(req) {
+    const list = {};
+    const cookieHeader = req.headers.cookie;
+    if (!cookieHeader) return list;
+    cookieHeader.split(`;`).forEach(cookie => {
+        let [name, ...rest] = cookie.split(`=`);
+        name = name?.trim();
+        if (!name) return;
+        let value = rest.join(`=`).trim();
+        if (/^"(.*)"$/.test(value)) value = value.slice(1, -1);
+        try { list[name] = decodeURIComponent(value); } catch (e) {}
+    });
+    return list;
+}
 
-                <div class="stats-grid">
-                    <div class="panel stat-card">
-                        <div class="stat-icon cyan"><i class="fa-solid fa-users-viewfinder"></i></div>
-                        <div class="stat-info"><h3>Total Users</h3><p>${totalUsers}</p></div>
-                    </div>
-                    <div class="panel stat-card">
-                        <div class="stat-icon purple"><i class="fa-solid fa-video"></i></div>
-                        <div class="stat-info"><h3>Active Streams</h3><p>${activeStreams}</p></div>
-                    </div>
-                    <div class="panel stat-card">
-                        <div class="stat-icon green"><i class="fa-solid fa-clock"></i></div>
-                        <div class="stat-info"><h3>Total Hours</h3><p>${totalHours}</p></div>
-                    </div>
-                    <div class="panel stat-card">
-                        <div class="stat-icon red"><i class="fa-solid fa-shield-halved"></i></div>
-                        <div class="stat-info"><h3>Bot Status</h3><p style="color: var(--success); font-size: 20px;">Online</p></div>
-                    </div>
-                </div>
+function startDashboard(port = 25570) {
+    const server = http.createServer(async (req, res) => {
+        const parsedUrl = url.parse(req.url, true);
+        const pathname = parsedUrl.pathname;
+        const cookies = parseCookies(req);
+        const isAuthenticated = cookies.logged_in === 'true';
 
-                <div class="panel chart-container">
-                    <div class="chart-header">
-                        <h2><i class="fa-solid fa-chart-simple"></i> Live Stream Activity Overview</h2>
-                    </div>
-                    <div class="chart-wrapper"><canvas id="userChart"></canvas></div>
-                </div>
+        // ── LOGIN PAGE ──
+        if (pathname === '/login' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            return res.end(LOGIN_TEMPLATE());
+        }
 
-                <div class="panel table-container">
-                    <div class="chart-header"><h2><i class="fa-solid fa-database"></i> Registered Streamers</h2></div>
-                    <table id="userTable" class="display" style="width:100%">
-                        <thead>
-                            <tr>
-                                <th>User Profile</th>
-                                <th>Room Input</th>
-                                <th>Channel Name</th>
-                                <th>Total Hours</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${tableRows}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+        // ── LOGIN POST ──
+        if (pathname === '/login' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', () => {
+                const params = new URLSearchParams(body);
+                const password = params.get('password');
+                if (password === DASHBOARD_PASSWORD) {
+                    res.writeHead(302, {
+                        'Location': '/dash',
+                        'Set-Cookie': 'logged_in=true; Path=/; HttpOnly'
+                    });
+                    res.end();
+                } else {
+                    res.writeHead(200, { 'Content-Type': 'text/html' });
+                    res.end(LOGIN_TEMPLATE('Invalid Password! Access Denied.'));
+                }
+            });
+            return;
+        }
 
-            <div id="toast">Action Successful!</div>
+        // ── LOGOUT ──
+        if (pathname === '/logout') {
+            res.writeHead(302, {
+                'Location': '/login',
+                'Set-Cookie': 'logged_in=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+            });
+            return res.end();
+        }
 
-            <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
-            <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
-            <script>
-                let userTable;
-                $(document).ready(function() {
-                    userTable = $('#userTable').DataTable({ "pageLength": 10, "order": [[ 3, "desc" ]] });
-                });
+        // ── ROOT REDIRECT ──
+        if (pathname === '/' || pathname === '') {
+            res.writeHead(302, { 'Location': isAuthenticated ? '/dash' : '/login' });
+            return res.end();
+        }
 
-                function deleteUser(id) {
-                    if(!confirm("Are you sure?")) return;
-                    fetch('/api/delete/' + id, { method: 'POST' })
-                    .then(res => res.json()).then(data => {
-                        if(data.success) {
-                            $('#row-' + id).fadeOut(500, function() { userTable.row($(this)).remove().draw(false); });
-                            showToast('User Deleted!', 'var(--danger)');
+        // Check authentication for protected routes below
+        if (!isAuthenticated) {
+            res.writeHead(302, { 'Location': '/login' });
+            return res.end();
+        }
+
+        // ── DASHBOARD PANEL ──
+        if (pathname === '/dash') {
+            const tokens = loadJson(TOKENS_FILE, {});
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            return res.end(HTML_TEMPLATE(tokens));
+        }
+
+        // ── API: DELETE USER ──
+        if (pathname.startsWith('/api/delete/') && req.method === 'POST') {
+            const userId = pathname.split('/')[3];
+            const tokens = loadJson(TOKENS_FILE, {});
+            if (tokens[userId]) {
+                delete tokens[userId];
+                saveJson(TOKENS_FILE, tokens);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ success: true }));
+            }
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ success: false, error: "User not found" }));
+        }
+
+        // ── API: LIVE STATS ──
+        if (pathname === '/api/live_stats') {
+            const tokens = loadJson(TOKENS_FILE, {});
+            const sortedUsers = Object.entries(tokens)
+                .sort((a, b) => (b[1].total_games_claimed || 0) - (a[1].total_games_claimed || 0))
+                .slice(0, 5);
+            
+            const labels = sortedUsers.map(([uid]) => uid.substring(0, 8) + "...");
+            const data = sortedUsers.map(([, info]) => info.total_games_claimed || 0);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ labels, data }));
+        }
+
+        // ── API: DISCORD USER INFO CACHE ──
+        if (pathname.startsWith('/api/user/')) {
+            const userId = pathname.split('/')[3];
+            const cache = loadJson(CACHE_FILE, {});
+
+            if (cache[userId]) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify(cache[userId]));
+            }
+
+            const botToken = process.env.BOT_TOKEN;
+            const discordReq = https.request(
+                {
+                    hostname: 'discord.com',
+                    path: `/api/v10/users/${userId}`,
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bot ${botToken}`,
+                        'User-Agent': 'DiscordBot (https://github.com/jeneyx, 1.0)'
+                    }
+                },
+                discordRes => {
+                    let data = '';
+                    discordRes.on('data', chunk => { data += chunk; });
+                    discordRes.on('end', () => {
+                        try {
+                            const json = JSON.parse(data);
+                            const avatarHash = json.avatar;
+                            const username = json.username;
+                            const discriminator = json.discriminator || '0';
+
+                            let avatarUrl = 'https://cdn.discordapp.com/embed/avatars/0.png';
+                            if (avatarHash) {
+                                const ext = avatarHash.startsWith('a_') ? 'gif' : 'png';
+                                avatarUrl = `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.${ext}?size=128`;
+                            } else {
+                                const defaultIndex = (BigInt(userId) >> 22n) % 6n;
+                                avatarUrl = `https://cdn.discordapp.com/embed/avatars/${defaultIndex}.png`;
+                            }
+
+                            const fullName = discriminator !== '0' ? `${username}#${discriminator}` : username;
+                            const result = { username: fullName, avatar: avatarUrl };
+
+                            cache[userId] = result;
+                            saveJson(CACHE_FILE, cache);
+
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify(result));
+                        } catch (e) {
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ username: 'Unknown User', avatar: 'https://cdn.discordapp.com/embed/avatars/0.png' }));
                         }
                     });
                 }
+            );
 
-                function showToast(msg, color) {
-                    var t = document.getElementById('toast');
-                    t.style.background = color; t.innerText = msg; t.style.display = 'flex';
-                    setTimeout(() => t.style.display = 'none', 3000);
-                }
+            discordReq.on('error', () => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ username: 'Unknown User', avatar: 'https://cdn.discordapp.com/embed/avatars/0.png' }));
+            });
 
-                const ctx = document.getElementById('userChart').getContext('2d');
-                let userChart = new Chart(ctx, {
-                    type: 'line',
-                    data: { labels: [], datasets: [{ label: 'Streaming Hours', data: [], borderColor: '#00F5FF', fill: true, tension: 0.4 }] },
-                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
-                });
+            discordReq.end();
+            return;
+        }
 
-                async function updateChart() {
-                    try {
-                        const res = await fetch('/api/live_stats');
-                        const data = await res.json();
-                        userChart.data.labels = data.labels;
-                        userChart.data.datasets[0].data = data.data;
-                        userChart.update('none');
-                    } catch(e) {}
-                }
-                updateChart();
-                setInterval(updateChart, 5000);
-            </script>
-        </body>
-        </html>
-      `);
-    }
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('404: Page Not Found');
+    });
 
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('404: Page Not Found');
-  });
+    const serverPort = process.env.PORT || port;
+    server.listen(serverPort, () => {
+        console.log(`[Dashboard] Node.js UI Server starting on 0.0.0.0:${serverPort}`);
+    });
 
-  server.listen(port, () => {
-    console.log(`[Dashboard] Node.js Dashboard server running on port ${port}`);
-  });
-
-  return server;
+    return server;
 }
 
-module.exports = { startDashboard };
+function start_dashboard() {
+    startDashboard(3000);
+}
+
+module.exports = { startDashboard, start_dashboard };
