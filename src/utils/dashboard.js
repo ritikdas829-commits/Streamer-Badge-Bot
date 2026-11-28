@@ -5,11 +5,10 @@ const url = require('url');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const crypto = require('crypto');
 
 const DASHBOARD_PASSWORD = "jeneyx papa";
 
-const TOKENS_FILE = path.join(process.cwd(), 'tokens.json');
+const USERS_FILE = path.join(process.cwd(), 'data', 'users.json'); // Ya jahan aapka users data save hota hai
 const CACHE_FILE = path.join(process.cwd(), 'profile_cache.json');
 
 function loadJson(file, fallback = {}) {
@@ -27,14 +26,14 @@ function saveJson(file, data) {
     } catch (e) {}
 }
 
-// ── HTML TEMPLATE ──
-const HTML_TEMPLATE = (tokens, errorMsg = '') => `
+// ── HTML TEMPLATE (STREAM BOT SPECIFIC) ──
+const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>jeneyx | Admin Panel</title>
+    <title>Stream Bot | Admin Panel</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
@@ -86,7 +85,7 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
             z-index: 10;
         }
         .brand { display: flex; align-items: center; gap: 15px; margin-bottom: 40px; padding: 0 10px; }
-        .brand img { height: 40px; border-radius: 50%; border: 2px solid var(--primary-color); box-shadow: 0 0 10px rgba(0,245,255,0.2); }
+        .brand i { font-size: 28px; color: var(--primary-color); }
         .brand h2 { font-size: 20px; font-weight: 800; letter-spacing: 0.5px; }
         .brand h2 span { color: var(--primary-color); }
         
@@ -145,12 +144,10 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
         table.dataTable thead th { background: transparent; border-bottom: 1px solid var(--border-color); color: var(--text-muted); font-size: 12px; text-transform: uppercase; padding: 15px 10px; }
         table.dataTable tbody td { padding: 15px 10px; border-bottom: 1px solid var(--border-color); font-size: 14px; }
         
-        .token-box { font-family: 'Courier New', monospace; color: #ccc; background: #000; padding: 6px 10px; border-radius: 4px; border: 1px solid #333; display: inline-block; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .token-box { font-family: 'Courier New', monospace; color: #ccc; background: #000; padding: 6px 10px; border-radius: 4px; border: 1px solid #333; display: inline-block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         
         .btn-action { padding: 8px 12px; border-radius: 6px; cursor: pointer; border: none; font-weight: 600; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; transition: 0.2s; }
-        .btn-copy { background: rgba(0, 245, 255, 0.1); color: var(--primary-color); border: 1px solid rgba(0, 245, 255, 0.3); }
-        .btn-copy:hover { background: var(--primary-color); color: #000; }
-        .btn-delete { background: rgba(255, 71, 87, 0.1); color: var(--danger); border: 1px solid rgba(255, 71, 87, 0.3); margin-left: 5px; }
+        .btn-delete { background: rgba(255, 71, 87, 0.1); color: var(--danger); border: 1px solid rgba(255, 71, 87, 0.3); }
         .btn-delete:hover { background: var(--danger); color: white; }
 
         /* User Profile UI */
@@ -175,11 +172,10 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
         
         .input-group { position: relative; margin-bottom: 20px; }
         .input-group i { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 16px; }
-        input[type="password"] { width: 100%; padding: 14px 14px 14px 45px; background: #000; border: 1px solid #333; color: white; border-radius: 8px; outline: none; transition: 0.2s; font-size: 15px; }
+        input[type="password"] { width: 100%; padding: 14px 14px 14px 45px; background: #000; border: 1px solid #333; color: white; border-radius: 8px; outline: none; font-size: 15px; }
         input[type="password"]:focus { border-color: var(--primary-color); }
         
-        .btn-login { width: 100%; padding: 14px; background: var(--primary-color); color: #000; border: none; border-radius: 8px; font-weight: 800; font-size: 16px; cursor: pointer; transition: 0.2s; }
-        .btn-login:hover { background: #00d0d9; }
+        .btn-login { width: 100%; padding: 14px; background: var(--primary-color); color: #000; border: none; border-radius: 8px; font-weight: 800; font-size: 16px; cursor: pointer; }
         .error-msg { color: var(--danger); font-size: 14px; margin-top: 15px; background: rgba(255, 71, 87, 0.1); padding: 10px; border-radius: 8px; border: 1px solid rgba(255, 71, 87, 0.3); }
 
         #toast { position: fixed; bottom: 30px; right: 30px; background: var(--success); color: white; padding: 15px 25px; border-radius: 8px; font-weight: 700; display: none; align-items: center; gap: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); z-index: 9999; border: 1px solid rgba(255,255,255,0.2); }
@@ -188,14 +184,12 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
 <body>
     <div class="sidebar">
         <div class="brand">
-            <img src="https://cdn.discordapp.com/icons/1545837289912008766/8a755141787ac342c2d56b352f1260eb.webp?size=1024" alt="Logo">
-            <h2>jeneyx <span>Core</span></h2>
+            <i class="fa-solid fa-video"></i>
+            <h2>Stream <span>Bot</span></h2>
         </div>
         <div class="nav-menu">
             <a href="#dashboard-section" class="nav-link active"><i class="fa-solid fa-chart-pie"></i> Dashboard</a>
-            <a href="#users-section" class="nav-link"><i class="fa-solid fa-users"></i> Users</a>
-            <a href="#" onclick="showToast('Nodes feature coming soon!', 'var(--primary-color)'); return false;" class="nav-link"><i class="fa-solid fa-server"></i> Nodes</a>
-            <a href="#" onclick="showToast('Settings feature coming soon!', 'var(--primary-color)'); return false;" class="nav-link"><i class="fa-solid fa-gear"></i> Settings</a>
+            <a href="#users-section" class="nav-link"><i class="fa-solid fa-users"></i> Streamers</a>
         </div>
         <a href="/logout" class="logout-btn"><i class="fa-solid fa-power-off"></i> End Session</a>
     </div>
@@ -203,8 +197,8 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
     <div class="main-content">
         <div id="dashboard-section" class="top-header">
             <div>
-                <h1>System Overview</h1>
-                <p>Live telemetry and database statistics.</p>
+                <h1>Stream Bot Overview</h1>
+                <p>Live streaming telemetry and user statistics.</p>
             </div>
             <div class="panel admin-profile">
                 <i class="fa-solid fa-user-shield"></i>
@@ -217,21 +211,21 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
                 <div class="stat-icon cyan"><i class="fa-solid fa-users-viewfinder"></i></div>
                 <div class="stat-info">
                     <h3>Total Users</h3>
-                    <p>${Object.keys(tokens).length}</p>
+                    <p>${Object.keys(users).length}</p>
                 </div>
             </div>
             <div class="panel stat-card">
-                <div class="stat-icon purple"><i class="fa-solid fa-gamepad"></i></div>
+                <div class="stat-icon purple"><i class="fa-solid fa-video"></i></div>
                 <div class="stat-info">
-                    <h3>Total Games</h3>
-                    <p>${Object.values(tokens).reduce((acc, v) => acc + (v.total_games_claimed || 0), 0)}</p>
+                    <h3>Active Streams</h3>
+                    <p>${activeStreamsCount}</p>
                 </div>
             </div>
             <div class="panel stat-card">
                 <div class="stat-icon green"><i class="fa-solid fa-clock"></i></div>
                 <div class="stat-info">
                     <h3>Total Hours</h3>
-                    <p>${Math.round(Object.values(tokens).reduce((acc, v) => acc + (v.total_hours_claimed || 0), 0))}</p>
+                    <p>${(Object.values(users).reduce((acc, v) => acc + (v.totalSeconds || 0), 0) / 3600).toFixed(1)} hrs</p>
                 </div>
             </div>
             <div class="panel stat-card">
@@ -245,7 +239,7 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
 
         <div class="panel chart-container">
             <div class="chart-header">
-                <h2><i class="fa-solid fa-chart-simple"></i> Live Top Users Performance</h2>
+                <h2><i class="fa-solid fa-chart-simple"></i> Live Streaming Hours Overview</h2>
                 <span style="font-size: 12px; color: var(--success);"><i class="fa-solid fa-circle" style="font-size: 8px;"></i> Live Updates</span>
             </div>
             <div class="chart-wrapper">
@@ -255,21 +249,20 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
 
         <div id="users-section" class="panel table-container">
             <div class="table-header">
-                <h2><i class="fa-solid fa-database"></i> Connected Accounts</h2>
+                <h2><i class="fa-solid fa-database"></i> Registered Streamers</h2>
             </div>
             <table id="userTable" class="display" style="width:100%">
                 <thead>
                     <tr>
                         <th>User Profile</th>
-                        <th>Account UID</th>
-                        <th>Token</th>
-                        <th>Games</th>
-                        <th>Hours</th>
+                        <th>Room Input</th>
+                        <th>Channel Name</th>
+                        <th>Total Hours</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${Object.entries(tokens).map(([d_id, data]) => `
+                    ${Object.entries(users).map(([d_id, data]) => `
                         <tr id="row-${d_id}">
                             <td>
                                 <div class="user-profile-cell">
@@ -280,13 +273,11 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
                                     </div>
                                 </div>
                             </td>
-                            <td style="color: var(--primary-color); font-weight: 600;">${data.user_id_cache || 'N/A'}</td>
-                            <td><span class="token-box" id="token-${d_id}">${data.token || 'N/A'}</span></td>
-                            <td><b>${data.total_games_claimed || 0}</b></td>
-                            <td>${(data.total_hours_claimed || 0).toFixed(1)}</td>
+                            <td><span class="token-box">${data.roomInput || 'N/A'}</span></td>
+                            <td>${data.channelName || 'N/A'}</td>
+                            <td><b>${((data.totalSeconds || 0) / 3600).toFixed(1)} hrs</b></td>
                             <td>
-                                <button class="btn-action btn-copy" onclick="copyToken('${d_id}')"><i class="fa-solid fa-copy"></i> Copy</button>
-                                <button class="btn-action btn-delete" onclick="deleteToken('${d_id}')"><i class="fa-solid fa-trash"></i></button>
+                                <button class="btn-action btn-delete" onclick="deleteUser('${d_id}')"><i class="fa-solid fa-trash"></i> Delete</button>
                             </td>
                         </tr>
                     `).join('')}
@@ -305,7 +296,7 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
             userTable = $('#userTable').DataTable({
                 "pageLength": 10,
                 "order": [[ 3, "desc" ]],
-                "language": { "search": "", "searchPlaceholder": "Search accounts..." }
+                "language": { "search": "", "searchPlaceholder": "Search streamers..." }
             });
             
             userTable.on('draw', function () {
@@ -329,17 +320,8 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
             } catch(e) { nameEl.innerText = "Unknown"; }
         }
 
-        function copyToken(id) {
-            var text = document.getElementById('token-' + id).innerText;
-            navigator.clipboard.writeText(text).then(() => {
-                showToast('Token Copied!', 'var(--success)');
-            }).catch(() => {
-                showToast('Failed to copy', 'var(--danger)');
-            });
-        }
-
-        function deleteToken(id) {
-            if(!confirm("Are you sure you want to delete this user and their token?")) return;
+        function deleteUser(id) {
+            if(!confirm("Are you sure you want to delete this streamer?")) return;
             fetch('/api/delete/' + id, { method: 'POST' })
             .then(response => response.json())
             .then(data => {
@@ -347,7 +329,7 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
                     $('#row-' + id).fadeOut(500, function() { 
                         userTable.row($(this)).remove().draw(false); 
                     });
-                    showToast('User Deleted!', 'var(--danger)');
+                    showToast('Streamer Deleted!', 'var(--danger)');
                 }
             });
         }
@@ -370,7 +352,7 @@ const HTML_TEMPLATE = (tokens, errorMsg = '') => `
             data: {
                 labels: [],
                 datasets: [{
-                    label: 'Games Claimed',
+                    label: 'Streaming Hours',
                     data: [],
                     borderColor: '#00F5FF',
                     backgroundColor: gradient,
@@ -416,7 +398,7 @@ const LOGIN_TEMPLATE = (errorMsg = '') => `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>jeneyx | Login</title>
+    <title>Stream Bot | Login</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
     <style>
@@ -448,7 +430,7 @@ const LOGIN_TEMPLATE = (errorMsg = '') => `
     <div class="panel login-box">
         <i class="fa-solid fa-shield-halved main-icon"></i>
         <h2>Root Authentication</h2>
-        <p>Secure access to jeneyx Dashboard</p>
+        <p>Secure access to Stream Bot Dashboard</p>
         <form method="POST" action="/login">
             <div class="input-group">
                 <i class="fa-solid fa-lock"></i>
@@ -477,7 +459,7 @@ function parseCookies(req) {
     return list;
 }
 
-function startDashboard(port = 25570) {
+function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, port = 3000) {
     const server = http.createServer(async (req, res) => {
         const parsedUrl = url.parse(req.url, true);
         const pathname = parsedUrl.pathname;
@@ -520,13 +502,16 @@ function startDashboard(port = 25570) {
             return res.end();
         }
 
-        // ── ROOT REDIRECT ──
+        if (pathname === '/ping') {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            return res.end('OK');
+        }
+
         if (pathname === '/' || pathname === '') {
             res.writeHead(302, { 'Location': isAuthenticated ? '/dash' : '/login' });
             return res.end();
         }
 
-        // Check authentication for protected routes below
         if (!isAuthenticated) {
             res.writeHead(302, { 'Location': '/login' });
             return res.end();
@@ -534,34 +519,34 @@ function startDashboard(port = 25570) {
 
         // ── DASHBOARD PANEL ──
         if (pathname === '/dash') {
-            const tokens = loadJson(TOKENS_FILE, {});
+            const users = getUsersFunc();
+            const activeStreams = sessionManager.sessions ? sessionManager.sessions.size : 0;
             res.writeHead(200, { 'Content-Type': 'text/html' });
-            return res.end(HTML_TEMPLATE(tokens));
+            return res.end(HTML_TEMPLATE(users, activeStreams));
         }
 
         // ── API: DELETE USER ──
         if (pathname.startsWith('/api/delete/') && req.method === 'POST') {
             const userId = pathname.split('/')[3];
-            const tokens = loadJson(TOKENS_FILE, {});
-            if (tokens[userId]) {
-                delete tokens[userId];
-                saveJson(TOKENS_FILE, tokens);
+            try {
+                deleteUserFunc(userId);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ success: true }));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ success: false, error: e.message }));
             }
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ success: false, error: "User not found" }));
         }
 
-        // ── API: LIVE STATS ──
+        // ── API: LIVE STATS FOR CHART ──
         if (pathname === '/api/live_stats') {
-            const tokens = loadJson(TOKENS_FILE, {});
-            const sortedUsers = Object.entries(tokens)
-                .sort((a, b) => (b[1].total_games_claimed || 0) - (a[1].total_games_claimed || 0))
+            const users = getUsersFunc();
+            const sortedUsers = Object.entries(users)
+                .sort((a, b) => (b[1].totalSeconds || 0) - (a[1].totalSeconds || 0))
                 .slice(0, 5);
             
             const labels = sortedUsers.map(([uid]) => uid.substring(0, 8) + "...");
-            const data = sortedUsers.map(([, info]) => info.total_games_claimed || 0);
+            const data = sortedUsers.map(([, info]) => Number(((info.totalSeconds || 0) / 3600).toFixed(1)));
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ labels, data }));
@@ -585,7 +570,7 @@ function startDashboard(port = 25570) {
                     method: 'GET',
                     headers: {
                         'Authorization': `Bot ${botToken}`,
-                        'User-Agent': 'DiscordBot (https://github.com/jeneyx, 1.0)'
+                        'User-Agent': 'DiscordBot (StreamBot, 1.0)'
                     }
                 },
                 discordRes => {
@@ -604,7 +589,7 @@ function startDashboard(port = 25570) {
                                 avatarUrl = `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.${ext}?size=128`;
                             } else {
                                 const defaultIndex = (BigInt(userId) >> 22n) % 6n;
-                                avatarUrl = `https://cdn.discordapp.com/embed/avatars/${defaultIndex}.png`;
+                                avatarUrl = `https://cdn.discordapp.com/embed/avatars/{defaultIndex}.png`.replace('{defaultIndex}', defaultIndex);
                             }
 
                             const fullName = discriminator !== '0' ? `${username}#${discriminator}` : username;
@@ -617,7 +602,7 @@ function startDashboard(port = 25570) {
                             res.end(JSON.stringify(result));
                         } catch (e) {
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ username: 'Unknown User', avatar: 'https://cdn.discordapp.com/embed/avatars/0.png' }));
+                            res.end(JSON.stringify({ username: 'Streamer User', avatar: 'https://cdn.discordapp.com/embed/avatars/0.png' }));
                         }
                     });
                 }
@@ -625,7 +610,7 @@ function startDashboard(port = 25570) {
 
             discordReq.on('error', () => {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ username: 'Unknown User', avatar: 'https://cdn.discordapp.com/embed/avatars/0.png' }));
+                res.end(JSON.stringify({ username: 'Streamer User', avatar: 'https://cdn.discordapp.com/embed/avatars/0.png' }));
             });
 
             discordReq.end();
@@ -636,16 +621,11 @@ function startDashboard(port = 25570) {
         res.end('404: Page Not Found');
     });
 
-    const serverPort = process.env.PORT || port;
-    server.listen(serverPort, () => {
-        console.log(`[Dashboard] Node.js UI Server starting on 0.0.0.0:${serverPort}`);
+    server.listen(port, () => {
+        console.log(`[Dashboard] Stream Bot UI Server listening on port ${port}`);
     });
 
     return server;
 }
 
-function start_dashboard() {
-    startDashboard(3000);
-}
-
-module.exports = { startDashboard, start_dashboard };
+module.exports = { startDashboard };
