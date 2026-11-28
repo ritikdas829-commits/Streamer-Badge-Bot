@@ -12,7 +12,6 @@ const DASHBOARD_PASSWORD = "jeneyx papa";
 const CACHE_FILE = path.join(process.cwd(), 'profile_cache.json');
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'default-secret-key-32-chars-min!!';
 
-// Get StreamUser model safely from mongoose
 const StreamUser = mongoose.models.StreamUser || mongoose.model('StreamUser');
 
 function loadJson(file, fallback = {}) {
@@ -65,7 +64,8 @@ const HTML_TEMPLATE = (usersList, activeStreamsCount) => `
         .brand h2 span { color: var(--primary-color); }
         .nav-menu { display: flex; flex-direction: column; gap: 8px; flex-grow: 1; }
         .nav-link { display: flex; align-items: center; gap: 15px; padding: 12px 18px; color: var(--text-muted); text-decoration: none; border-radius: 8px; font-weight: 600; transition: 0.2s; background: rgba(0, 245, 255, 0.1); color: var(--primary-color); }
-        .logout-btn { margin-top: auto; display: flex; align-items: center; gap: 15px; padding: 12px 18px; color: var(--danger); text-decoration: none; border-radius: 8px; font-weight: 700; background: rgba(255, 71, 87, 0.1); border: 1px solid rgba(255, 71, 87, 0.2); }
+        .logout-btn { margin-top: auto; display: flex; align-items: center; gap: 15px; padding: 12px 18px; color: var(--danger); text-decoration: none; border-radius: 8px; font-weight: 700; background: rgba(255, 71, 87, 0.1); border: 1px solid rgba(255, 71, 87, 0.2); transition: 0.2s; }
+        .logout-btn:hover { background: var(--danger); color: white; }
         .main-content { flex-grow: 1; overflow-y: auto; padding: 30px 40px; height: 100vh; }
         .top-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
         .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
@@ -264,48 +264,92 @@ const HTML_TEMPLATE = (usersList, activeStreamsCount) => `
 </html>
 `;
 
+const LOGIN_TEMPLATE = (errorMsg = '') => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Bot | Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { background-color: #000; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+        .box { background: #0a0a0a; border: 1px solid #1a1a1a; padding: 35px; border-radius: 12px; width: 340px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); text-align: center; }
+        h2 { margin-bottom: 20px; font-weight: 800; font-size: 22px; }
+        h2 span { color: #00F5FF; }
+        input { width: 100%; padding: 12px; margin-bottom: 15px; background: #000; border: 1px solid #222; color: #fff; border-radius: 6px; box-sizing: border-box; font-size: 14px; }
+        input:focus { border-color: #00F5FF; outline: none; }
+        button { background: #00F5FF; color: #000; border: none; padding: 12px; width: 100%; border-radius: 6px; font-weight: 700; cursor: pointer; transition: 0.2s; }
+        button:hover { opacity: 0.9; }
+        .error { color: #ff4757; font-size: 13px; margin-top: 10px; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h2>Stream <span>Admin</span></h2>
+        <form method="POST" action="/login">
+            <input type="password" name="password" placeholder="Enter Dashboard Password" required>
+            <button type="submit">Access Panel</button>
+        </form>
+        ${errorMsg ? `<div class="error">${errorMsg}</div>` : ''}
+    </div>
+</body>
+</html>
+`;
+
+function parseCookies(req) {
+    const list = {};
+    const cookieHeader = req.headers.cookie;
+    if (!cookieHeader) return list;
+    cookieHeader.split(`;`).forEach(cookie => {
+        let [name, ...rest] = cookie.split(`=`);
+        name = name?.trim();
+        if (!name) return;
+        let value = rest.join(`=`).trim();
+        if (/^"(.*)"$/.test(value)) value = value.slice(1, -1);
+        try { list[name] = decodeURIComponent(value); } catch (e) {}
+    });
+    return list;
+}
+
 function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, port = 3000) {
     const server = http.createServer(async (req, res) => {
         const parsedUrl = url.parse(req.url, true);
         const pathname = parsedUrl.pathname;
-        const cookies = req.headers.cookie || '';
-        const isAuthenticated = cookies.includes('logged_in=true');
+        const cookies = parseCookies(req);
+        const isAuthenticated = cookies.logged_in === 'true';
 
+        // ── STRICT AUTHENTICATION GUARD ──
         if (pathname === '/login' && req.method === 'GET') {
             res.writeHead(200, { 'Content-Type': 'text/html' });
-            return res.end(`
-                <!DOCTYPE html>
-                <html lang="en">
-                <head><title>Login</title>
-                <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;700&display=swap" rel="stylesheet">
-                <style>
-                    body { background: #000; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
-                    .box { background: #0a0a0a; border: 1px solid #1a1a1a; padding: 35px; border-radius: 12px; width: 320px; text-align: center; }
-                    input { width: 100%; padding: 12px; margin-bottom: 15px; background: #000; border: 1px solid #222; color: #fff; border-radius: 6px; box-sizing: border-box; }
-                    button { background: #00F5FF; color: #000; border: none; padding: 12px; width: 100%; border-radius: 6px; font-weight: 700; cursor: pointer; }
-                </style></head>
-                <body><div class="box"><h2>Stream <span>Admin</span></h2>
-                <form method="POST" action="/login"><input type="password" name="password" placeholder="Password" required><button type="submit">Login</button></form></div></body></html>
-            `);
+            return res.end(LOGIN_TEMPLATE());
         }
 
         if (pathname === '/login' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => { body += chunk; });
             req.on('end', () => {
-                if (new URLSearchParams(body).get('password') === DASHBOARD_PASSWORD) {
-                    res.writeHead(302, { 'Location': '/dash', 'Set-Cookie': 'logged_in=true; Path=/' });
+                const params = new URLSearchParams(body);
+                const password = params.get('password');
+                if (password === DASHBOARD_PASSWORD) {
+                    res.writeHead(302, {
+                        'Location': '/dash',
+                        'Set-Cookie': 'logged_in=true; Path=/; HttpOnly; SameSite=Lax'
+                    });
                     res.end();
                 } else {
-                    res.writeHead(302, { 'Location': '/login' });
-                    res.end();
+                    res.writeHead(200, { 'Content-Type': 'text/html' });
+                    res.end(LOGIN_TEMPLATE('Galat password! Dobara try karo.'));
                 }
             });
             return;
         }
 
         if (pathname === '/logout') {
-            res.writeHead(302, { 'Location': '/login', 'Set-Cookie': 'logged_in=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT' });
+            res.writeHead(302, {
+                'Location': '/login',
+                'Set-Cookie': 'logged_in=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+            });
             return res.end();
         }
 
@@ -314,17 +358,19 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
             return res.end('OK');
         }
 
+        // Redirect root to dash if authenticated, else login
         if (pathname === '/' || pathname === '') {
             res.writeHead(302, { 'Location': isAuthenticated ? '/dash' : '/login' });
             return res.end();
         }
 
+        // Block all unauthenticated API & Dashboard requests
         if (!isAuthenticated) {
             res.writeHead(302, { 'Location': '/login' });
             return res.end();
         }
 
-        // ── DASHBOARD ROUTE (Directly query MongoDB for all users) ──
+        // ── PROTECTED DASHBOARD PANEL ──
         if (pathname === '/dash') {
             let usersList = [];
             try {
@@ -340,6 +386,7 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
             return res.end(HTML_TEMPLATE(usersList, activeStreams));
         }
 
+        // ── PROTECTED APIS ──
         if (pathname.startsWith('/api/delete/') && req.method === 'POST') {
             const userId = pathname.split('/')[3];
             try {
@@ -435,7 +482,7 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
     });
 
     server.listen(port, () => {
-        console.log(`[Dashboard] MongoDB-connected Stream Bot UI Server listening on port ${port}`);
+        console.log(`[Dashboard] Locked & Secured Stream Bot UI Server listening on port ${port}`);
     });
 
     return server;
