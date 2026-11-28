@@ -21,10 +21,34 @@ const BOT_NAME = process.env.BOT_NAME || 'Streamer';
 const PREFIX = process.env.DEFAULT_PREFIX || '.';
 const PORT = process.env.PORT || 3000;
 
-// ─── RENDER KEEP-ALIVE HTTP SERVER (Fixes "No open ports detected") ───
+// ─── RENDER KEEP-ALIVE & DASHBOARD HTTP SERVER ───
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Bot is alive and running high-stability mode!');
+  if (req.url === '/dash' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+      <html>
+        <head>
+          <title>${BOT_NAME} - Dashboard</title>
+          <style>
+            body { background: #0f172a; color: #f8fafc; font-family: Arial, sans-serif; text-align: center; padding-top: 50px; }
+            .card { background: #1e293b; max-width: 500px; margin: auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+            h1 { color: #38bdf8; }
+            p { color: #94a3b8; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>🤖 ${BOT_NAME} Bot Dashboard</h1>
+            <p>Status: <strong style="color: #4ade80;">Online & Running High-Stability Mode</strong></p>
+            <p>Active Streaming Sessions: <strong>${sessionManager.sessions.size}</strong></p>
+          </div>
+        </body>
+      </html>
+    `);
+  } else {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  }
 });
 
 server.listen(PORT, () => {
@@ -96,7 +120,6 @@ setInterval(() => {
 // ─── CRASH-PROOF GLOBAL ERROR HANDLERS ───
 process.on('uncaughtException', (err) => {
   console.error('[CRITICAL] Uncaught Exception:', err);
-  // Prevent immediate hard crash if non-fatal, or log properly
 });
 
 process.on('unhandledRejection', (reason, promise) => {
