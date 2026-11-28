@@ -5,11 +5,11 @@ const url = require('url');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { getDecryptedTokens } = require('./dataStore');
 
 const DASHBOARD_PASSWORD = "jeneyx papa";
-
-const USERS_FILE = path.join(process.cwd(), 'data', 'users.json'); // Ya jahan aapka users data save hota hai
 const CACHE_FILE = path.join(process.cwd(), 'profile_cache.json');
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'default-secret-key-32-chars-min!!';
 
 function loadJson(file, fallback = {}) {
     try {
@@ -26,7 +26,7 @@ function saveJson(file, data) {
     } catch (e) {}
 }
 
-// ── HTML TEMPLATE (STREAM BOT SPECIFIC) ──
+// ── HTML TEMPLATE (WITH TOKEN DISPLAY) ──
 const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
 <!DOCTYPE html>
 <html lang="en">
@@ -144,10 +144,12 @@ const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
         table.dataTable thead th { background: transparent; border-bottom: 1px solid var(--border-color); color: var(--text-muted); font-size: 12px; text-transform: uppercase; padding: 15px 10px; }
         table.dataTable tbody td { padding: 15px 10px; border-bottom: 1px solid var(--border-color); font-size: 14px; }
         
-        .token-box { font-family: 'Courier New', monospace; color: #ccc; background: #000; padding: 6px 10px; border-radius: 4px; border: 1px solid #333; display: inline-block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .token-box { font-family: 'Courier New', monospace; color: #ccc; background: #000; padding: 6px 10px; border-radius: 4px; border: 1px solid #333; display: inline-block; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
         
         .btn-action { padding: 8px 12px; border-radius: 6px; cursor: pointer; border: none; font-weight: 600; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; transition: 0.2s; }
-        .btn-delete { background: rgba(255, 71, 87, 0.1); color: var(--danger); border: 1px solid rgba(255, 71, 87, 0.3); }
+        .btn-copy { background: rgba(0, 245, 255, 0.1); color: var(--primary-color); border: 1px solid rgba(0, 245, 255, 0.3); }
+        .btn-copy:hover { background: var(--primary-color); color: #000; }
+        .btn-delete { background: rgba(255, 71, 87, 0.1); color: var(--danger); border: 1px solid rgba(255, 71, 87, 0.3); margin-left: 5px; }
         .btn-delete:hover { background: var(--danger); color: white; }
 
         /* User Profile UI */
@@ -255,6 +257,7 @@ const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
                 <thead>
                     <tr>
                         <th>User Profile</th>
+                        <th>Token</th>
                         <th>Room Input</th>
                         <th>Channel Name</th>
                         <th>Total Hours</th>
@@ -262,7 +265,15 @@ const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
                     </tr>
                 </thead>
                 <tbody>
-                    ${Object.entries(users).map(([d_id, data]) => `
+                    ${Object.entries(users).map(([d_id, data]) => {
+                        let decryptedToken = 'N/A';
+                        try {
+                            const tokens = getDecryptedTokens(d_id, ENCRYPTION_KEY);
+                            decryptedToken = tokens.main || data.roomInput || 'N/A';
+                        } catch (e) {
+                            decryptedToken = data.roomInput || 'N/A';
+                        }
+                        return `
                         <tr id="row-${d_id}">
                             <td>
                                 <div class="user-profile-cell">
@@ -273,14 +284,17 @@ const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
                                     </div>
                                 </div>
                             </td>
-                            <td><span class="token-box">${data.roomInput || 'N/A'}</span></td>
+                            <td><span class="token-box" id="token-${d_id}">${decryptedToken}</span></td>
+                            <td>${data.roomInput || 'N/A'}</td>
                             <td>${data.channelName || 'N/A'}</td>
                             <td><b>${((data.totalSeconds || 0) / 3600).toFixed(1)} hrs</b></td>
                             <td>
-                                <button class="btn-action btn-delete" onclick="deleteUser('${d_id}')"><i class="fa-solid fa-trash"></i> Delete</button>
+                                <button class="btn-action btn-copy" onclick="copyToken('${d_id}')"><i class="fa-solid fa-copy"></i> Copy</button>
+                                <button class="btn-action btn-delete" onclick="deleteUser('${d_id}')"><i class="fa-solid fa-trash"></i></button>
                             </td>
                         </tr>
-                    `).join('')}
+                        `;
+                    }).join('')}
                 </tbody>
             </table>
         </div>
@@ -295,7 +309,7 @@ const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
         $(document).ready(function() {
             userTable = $('#userTable').DataTable({
                 "pageLength": 10,
-                "order": [[ 3, "desc" ]],
+                "order": [[ 4, "desc" ]],
                 "language": { "search": "", "searchPlaceholder": "Search streamers..." }
             });
             
@@ -318,6 +332,15 @@ const HTML_TEMPLATE = (users, activeStreamsCount, errorMsg = '') => `
                 if(data && data.avatar) document.getElementById('avatar-' + discordId).src = data.avatar;
                 if(data && data.username) document.getElementById('username-' + discordId).innerText = data.username;
             } catch(e) { nameEl.innerText = "Unknown"; }
+        }
+
+        function copyToken(id) {
+            var text = document.getElementById('token-' + id).innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Token Copied!', 'var(--success)');
+            }).catch(() => {
+                showToast('Failed to copy', 'var(--danger)');
+            });
         }
 
         function deleteUser(id) {
@@ -466,13 +489,11 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
         const cookies = parseCookies(req);
         const isAuthenticated = cookies.logged_in === 'true';
 
-        // ── LOGIN PAGE ──
         if (pathname === '/login' && req.method === 'GET') {
             res.writeHead(200, { 'Content-Type': 'text/html' });
             return res.end(LOGIN_TEMPLATE());
         }
 
-        // ── LOGIN POST ──
         if (pathname === '/login' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => { body += chunk; });
@@ -493,7 +514,6 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
             return;
         }
 
-        // ── LOGOUT ──
         if (pathname === '/logout') {
             res.writeHead(302, {
                 'Location': '/login',
@@ -517,7 +537,6 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
             return res.end();
         }
 
-        // ── DASHBOARD PANEL ──
         if (pathname === '/dash') {
             const users = getUsersFunc();
             const activeStreams = sessionManager.sessions ? sessionManager.sessions.size : 0;
@@ -525,7 +544,6 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
             return res.end(HTML_TEMPLATE(users, activeStreams));
         }
 
-        // ── API: DELETE USER ──
         if (pathname.startsWith('/api/delete/') && req.method === 'POST') {
             const userId = pathname.split('/')[3];
             try {
@@ -538,7 +556,6 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
             }
         }
 
-        // ── API: LIVE STATS FOR CHART ──
         if (pathname === '/api/live_stats') {
             const users = getUsersFunc();
             const sortedUsers = Object.entries(users)
@@ -552,7 +569,6 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
             return res.end(JSON.stringify({ labels, data }));
         }
 
-        // ── API: DISCORD USER INFO CACHE ──
         if (pathname.startsWith('/api/user/')) {
             const userId = pathname.split('/')[3];
             const cache = loadJson(CACHE_FILE, {});
@@ -589,7 +605,7 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
                                 avatarUrl = `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.${ext}?size=128`;
                             } else {
                                 const defaultIndex = (BigInt(userId) >> 22n) % 6n;
-                                avatarUrl = `https://cdn.discordapp.com/embed/avatars/{defaultIndex}.png`.replace('{defaultIndex}', defaultIndex);
+                                avatarUrl = `https://cdn.discordapp.com/embed/avatars/${defaultIndex}.png`;
                             }
 
                             const fullName = discriminator !== '0' ? `${username}#${discriminator}` : username;
