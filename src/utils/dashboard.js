@@ -481,8 +481,11 @@ function startDashboard(client, sessionManager, getUsersFunc, deleteUserFunc, po
         res.end('404: Page Not Found');
     });
 
-    server.listen(port, () => {
-        console.log(`[Dashboard] Locked & Secured Stream Bot UI Server listening on port ${port}`);
+    // 🔥 FIX: Render environment port integration
+    const PORT = process.env.PORT || port || 3000;
+
+    server.listen(PORT, '0.0.0.0', () => {
+        console.log(`[Dashboard] Locked & Secured Stream Bot UI Server listening on port ${PORT}`);
     });
 
     return server;
